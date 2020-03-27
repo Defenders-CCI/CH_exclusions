@@ -1,0 +1,223 @@
+---
+title: "Critical habitat exclusions under the ESA"
+author: "Center for Conservation Innovation"
+date: "`r Sys.Date()`"
+output:
+  rmarkdown::html_document:
+    css: custom.css
+    df_print: paged
+    fig_caption: yes
+    fig_width: 7
+    highlight: tango
+    toc: true
+    toc_depth: 3
+    toc_float: true
+editor_options: 
+  chunk_output_type: console
+---
+
+
+```{r include = FALSE}
+library(htmlTable)
+library(dplyr)
+library(plyr)
+library(knitr)
+library(rio)
+library(tidyr)
+library(tidyverse)
+
+#dat <- readRDS("data/CH_exclusions_data.rds")[1:84,]
+# Updated data from Andrew
+dat <- read.csv(file = 'data-raw/CH_exclusions_revised.csv', header=TRUE,
+                stringsAsFactors = FALSE)
+lis <- read.csv('data/listing_data_2019-12-16.csv', header = TRUE)
+#lis <- import("data/listing_data_2019-12-16.csv")
+names(lis) <- c("common_name", "scientific_name", "sp_url", "status", "entity",
+                "esa_listing_date", "reg_desc", "reg_name", "reg_url", "taxon",
+                "ch", "ch_date")
+lis$ch <- ifelse(lis$ch == "", "None", as.character(lis$ch))
+
+d2 <- left_join(dat, lis, by="scientific_name")%>% 
+  select(-c("common_name.y", "status.y", "esa_listing_date.y"))
+names(d2)[1:5] <- c("common", "scientific", "url", "status", "listing_date")
+d2$esa_listing_date <- as.Date(d2$listing_date, format = "%m-%d-%Y")
+```
+
+## INTRO
+
+Something...something...
+
+----
+
+```{r echo=FALSE}
+d2$proposed_excl <- if_else(
+  d2$proposed_rule_economic_costs == 1 |
+  d2$proposed_rule_national_security == 1 |
+  d2$proposed_rule_other_exclusions == 1,
+  1,
+  0
+)
+
+d2$final_excl <- if_else(
+  d2$final_rule_economic_exclusions == 1 |
+  d2$final_rule_national_security == 1 |
+  d2$final_rule_other_exclusions == 1,
+  1,
+  0
+)
+
+d2$ch_excl_gain <- if_else(d2$final_excl == 1 & d2$proposed_excl == 0, 1, 0)
+d2$ch_excl_loss <- if_else(d2$final_excl == 0 & d2$proposed_excl == 1, 1, 0)
+```
+
+We find `r sum(d2$ch_excl_gain, na.rm = TRUE)` cases in which **CH exclusions were not proposed but then were added in the final rule.**  In contrast, we find `r sum(d2$ch_excl_loss, na.rm = TRUE)` cases in which **CH exclusions were proposed but then dropped in the final rule.**
+
+----
+
+```{r regions echo=FALSE, warning=FALSE}
+# filter listed species to those that have a final CH designation
+fin_ch <- filter(lis, ch %in% c("Final"))
+# tabulate frequencies of these species among regions
+w_ch <- table(fin_ch$ch, fin_ch$reg_name)
+w_ch <- table(fin_ch$reg_name)
+# tabluate frequencies of all species among regions
+all_spp <- table(lis$reg_name)
+
+#calculate rates of critical habitat designation by region (freq)
+ch_rates_reg <- (w_ch / all_spp) %>% round(digits = 3) %>%
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::rename(region = Var1, freq = Freq)
+
+# filter data to species with final exclusions
+fin_excl <- filter(d2, final_excl == 1)
+# tabulate number of exclusions by region
+fin_excl_tab <- table(fin_excl$reg_name) %>% 
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::rename(region = Var1, "Final Excl. Freq." = Freq)
+
+# tabulate number of sample species by region
+fin_d2_tab <- table(d2$reg_name) %>% 
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::rename(region = Var1, "Sample Spp." = Freq)
+
+# create table of region stats including ch freq
+f2 <- left_join(ch_rates_reg, fin_excl_tab, by = "region") %>%
+  left_join(fin_d2_tab, by = "region")
+f2$`Excl. Rate` <- f2$`Final Excl. Freq.` / f2$`Sample Spp.`
+names(f2)[2] <- 'ch. freq'
+knitr::kable(f2)
+```
+
+```{r region_tests echo=FALSE}
+# Table of frequencies of critical habitat exclusion reasons
+ch_x_region <- table(lis$reg_name, lis$ch) %>% 
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  rename(region = Var1, ch_status = Var2, n_spp = Freq)
+
+ch_reg_excl <- left_join(f2, ch_x_region, by = "region")
+knitr::kable(ch_reg_excl)
+
+# perform chi-square test for difference in frequencies between CH designation
+# and exclusions
+# expected rates of exclusion (based on distribution of CH species among regions)
+p <- (fin_d2_tab$`Sample Spp.`/sum(fin_d2_tab$`Sample Spp.`))
+# observed rates of exclusion
+x <- f2$`Final Excl. Freq.`
+
+chisq.test(x = x[-c(6)], p = p[-c(6)])
+
+# Now use permutation to identify which regions are over/under excluding
+reg_mat <- matrix(c(fin_excl_tab$`Final Excl. Freq.`,
+                    fin_d2_tab$`Sample Spp.` - fin_excl_tab$`Final Excl. Freq.`),
+       ncol = 2)
+
+# permute the matrix 1000x
+reg_permat <- vegan::permatfull(reg_mat, fixedmar = 'both', mtype = 'count', times = 1000)
+# tabulate instances where the observed frequency > expected
+permtests <- lapply(reg_permat$perm, function(i){return(reg_mat != i)})
+# calculate effect size as difference between observed and mean expected
+permeff <- reg_mat - Reduce('+', reg_permat$perm)/1000
+# calculate probability as proportion of permutations with observed > expected
+permstats <- Reduce('+', permtests)/1000
+
+reg_stats <- data.frame(region = fin_excl_tab$region,
+                        effect = permeff[,1],
+                        prob = 1-permstats[,1])
+knitr::kable(reg_stats)
+```
+
+```{r taxa echo=FALSE, warning=FALSE}
+# tabulate frequencies of critical habitat species among taxa
+t_ch <- table(fin_ch$ch, fin_ch$taxon)
+t_ch <- table(fin_ch$taxon)
+# tabluate frequencies of all species among taxa
+all_spp_tax <- table(lis$taxon)
+
+#calculate rates of critical habitat designation by taxa
+ch_rates_tax <- (t_ch / all_spp_tax) %>% round(digits = 3) %>%
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::rename(taxon = Var1, freq = Freq)
+
+# 
+fin_excl_tab_taxa <- table(fin_excl$taxon) %>% 
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::rename(taxon = Var1, "Final Excl. Freq." = Freq)
+
+fin_d2_tab_taxa <- table(d2$taxon) %>% 
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::rename(taxon = Var1, "Sample Spp." = Freq)
+
+f2_taxa <- left_join(ch_rates_tax, fin_excl_tab_taxa, by = "taxon") %>%
+  left_join(fin_d2_tab_taxa, by = "taxon")
+f2_taxa$`Excl. Rate` <- f2_taxa$`Final Excl. Freq.` / f2_taxa$`Sample Spp.`
+names(f2_taxa)[2] <- 'ch. freq'
+knitr::kable(f2_taxa)
+```
+
+```{r taxa_tests echo=FALSE}
+# Table of frequencies of critical habitat exclusion reasons by taxa
+ch_x_taxa <- table(lis$taxon, lis$ch) %>% 
+  as.data.frame(stringsAsFactors = FALSE) %>%
+  dplyr::rename(taxon = Var1, ch_status = Var2, n_spp = Freq)
+
+ch_tax_excl <- left_join(f2_taxa, ch_x_taxa, by = "taxon")
+knitr::kable(ch_tax_excl)
+
+# perform chi-square test for difference in frequencies between CH designation
+# and exclusions
+p <- (f2_taxa$`Sample Spp.`/sum(f2_taxa$`Sample Spp.`))
+x <- f2_taxa$`Final Excl. Freq.`
+chisq.test(x = x[-c(5,6,12)], p = p[-c(5,6,12)])#, simulate.p.value = TRUE)
+
+# Now use permutation to identify which regions are over/under excluding
+tax_mat <- matrix(c(fin_excl_tab_taxa$`Final Excl. Freq.`,
+                    fin_d2_tab_taxa$`Sample Spp.` - fin_excl_tab_taxa$`Final Excl. Freq.`),
+       ncol = 2)
+
+# permute the matrix 1000x
+tax_permat <- vegan::permatfull(tax_mat, fixedmar = 'both', mtype = 'count', times = 1000)
+# tabulate instances where the observed frequency > expected
+permtests <- lapply(tax_permat$perm, function(i){return(tax_mat != i)})
+# calculate effect size as difference between observed and mean expected
+permeff <- tax_mat - Reduce('+', tax_permat$perm)/1000
+# calculate probability as proportion of permutations with observed > expected
+permstats <- Reduce('+', permtests)/1000
+
+taxa_stats <- data.frame(taxon = fin_excl_tab_taxa$taxon,
+                         effect = permeff[,1],
+                         prob = 1-permstats[,1])
+knitr::kable(taxa_stats)
+```
+
+```{r echo=FALSE}
+
+# prop_excl <- filter(d2, d2$)
+# 
+# table(d2$reg_name, d2$proposed_rule_economic_costs)
+# table(d2$reg_name, d2$proposed_rule_national_security)
+# table(d2$reg_name, d2$proposed_rule_other_exclusions)
+# 
+# table(d2$reg_name, d2$final_rule_economic_exclusions)
+# table(d2$reg_name, d2$final_rule_national_security)
+# table(d2$reg_name, d2$final_rule_other_exclusions)
+```
